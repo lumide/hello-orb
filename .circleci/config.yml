@@ -33,7 +33,110 @@ commands:
                     PARAM_GH_DIR: <<parameters.dir>>
                     PARAM_GH_REPO: <<parameters.repo>>
                 name: Cloning repository
-    
+    install:
+        description: Install the gh cli without authenticating or configuring. This command should be run before invoking the gh cli.
+        parameters:
+            version:
+                default: 2.3.0
+                description: Specify the full semver versioned tag to use.
+                type: string
+        steps:
+            - run:
+                command: |
+                    #!/bin/bash
+                    # set smart sudo
+                    if [[ $EUID == 0 ]]; then export SUDO=""; else export SUDO="sudo"; fi
+
+                    # Define current platform
+                    if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
+                    	export SYS_ENV_PLATFORM=macos
+                    elif [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
+                    	export SYS_ENV_PLATFORM=linux_x86
+                    elif [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "aarch64" ]]; then
+                    	export SYS_ENV_PLATFORM=linux_arm
+                    else
+                    	echo "This platform appears to be unsupported."
+                    	uname -a
+                    	exit 1
+                    fi
+
+                    # If not installed
+                    if ! command -v gh >/dev/null 2>&1; then
+                    	echo "Installing the GitHub CLI"
+                    	case $SYS_ENV_PLATFORM in
+                    		linux_x86)
+                    			curl -sSL "https://github.com/cli/cli/releases/download/v${PARAM_GH_CLI_VERSION}/gh_${PARAM_GH_CLI_VERSION}_linux_amd64.deb" -o "gh-cli.deb"
+                    			$SUDO apt install ./gh-cli.deb
+                    			rm gh-cli.deb
+                    			;;
+                    		macos)
+                    			curl -sSL "https://github.com/cli/cli/releases/download/v${PARAM_GH_CLI_VERSION}/gh_${PARAM_GH_CLI_VERSION}_macOS_amd64.tar.gz" -o "gh-cli.tar.gz"
+                    			$SUDO tar -xf ./gh-cli.tar.gz -C /usr/local/ --strip-components=1
+                    			rm gh-cli.tar.gz
+                    			;;
+                    		linux_arm)
+                    			curl -sSL "https://github.com/cli/cli/releases/download/v${PARAM_GH_CLI_VERSION}/gh_${PARAM_GH_CLI_VERSION}_linux_arm64.tar.gz" -o "gh-cli.tar.gz"
+                    			$SUDO tar -xf ./gh-cli.tar.gz -C /usr/local/ --strip-components=1
+                    			rm gh-cli.tar.gz
+                    			;;
+                    		*)
+                    		echo "This orb does not currently support your platform. If you believe it should, please consider opening an issue on the GitHub repository:"
+                    		echo "https://github.com/CircleCI-Public/github-cli-orb"
+                    		exit 1
+                    	;;
+                    	esac
+                    	# Validate install.
+                    	echo
+                    	echo "GH CLI installed"
+                    	command -v gh
+                    else
+                    	echo "GH CLI is already installed."
+                    fi
+                environment:
+                    PARAM_GH_CLI_VERSION: <<parameters.version>>
+                name: Install GH CLI v<<parameters.version>>
+    setup:
+        description: Install and authenticate with the gh cli. This command should be run before invoking the gh cli.
+        parameters:
+            hostname:
+                default: github.com
+                description: Specify the hostname of the GitHub instance to authenticate with.
+                type: string
+            token:
+                default: GITHUB_TOKEN
+                description: |
+                    Enter the name of the environment variable containing the GitHub Personal Access token to be used for authentication.
+                    It is recommended for CI processes that you create a "machine" user on GitHub.com with the needed permissions, rather than using your own.
+                type: env_var_name
+            version:
+                default: 2.3.0
+                description: Specify the full semver versioned tag to use.
+                type: string
+        steps:
+            - install:
+                version: <<parameters.version>>
+            - run:
+                command: |
+                    #!/bin/bash
+                    # Get auth token
+                    export GITHUB_TOKEN=${!PARAM_GH_TOKEN}
+                    [ -z "$GITHUB_TOKEN" ] && echo "A GitHub token must be supplied. Check the \"token\" parameter." && exit 1
+                    echo "export GITHUB_TOKEN=\"${GITHUB_TOKEN}\"" >> "$BASH_ENV"
+
+                    # Authenticate
+                    echo
+                    echo "Authenticating GH CLI"
+                    gh auth setup-git --hostname "$PARAM_GH_HOSTNAME"
+                    gh auth status
+
+                    # Configure
+                    echo
+                    echo "Disabling interactive prompts for GH CLI"
+                    gh config set prompt disabled
+                environment:
+                    PARAM_GH_HOSTNAME: <<parameters.hostname>>
+                    PARAM_GH_TOKEN: <<parameters.token>>
+                name: Configure GH CLI v<<parameters.version>>
 jobs:
     release:
         description: |
@@ -150,5 +253,55 @@ examples:
                                 - node/test
                             tag: 1.0.0
                             title: The initial release
-
+    install:
+        description: |
+            Simply install the GitHub CLI for manual usage. The `install` command is used to install the GitHub CLI without authenticating or configuring it. Once the installation is complete, you can utilize the CLI manually, or use any of the other provided orb commands, such as `clone`.
+        usage:
+            version: "2.1"
+            orbs:
+                gh: circleci/github-cli@2.0
+            jobs:
+                create-a-deployment:
+                    docker:
+                        - image: cimg/base:stable
+                    steps:
+                        - gh/install
+                        - run:
+                            command: |
+                                gh api /repos/:owner/:repo/deployments --preview ant-man --input - \
+                                --jq '"export GH_DEPLOYMENT_STATUS_URL=\(.statuses_url)"' >> $BASH_ENV \<<JSON || true
+                                {
+                                "ref": "${CIRCLE_TAG:-$CIRCLE_SHA1}",
+                                "environment": "${AWS_ENVIRONMENT,,}",
+                                "auto_merge": false,
+                                "required_contexts": []
+                                }
+                                JSON
+                            name: Create Deployment
+            workflows:
+                use-my-orb:
+                    jobs:
+                        - create-a-deployment
+    setup:
+        description: |
+            Simply install the GitHub CLI for manual usage. The `setup` command is used to install and authenticate the GitHub CLI. Once the setup is complete, you can utilize the CLI manually, or use any of the other provided orb commands, such as `clone`.
+        usage:
+            version: "2.1"
+            orbs:
+                gh: circleci/github-cli@2.0
+            jobs:
+                create-a-pr:
+                    docker:
+                        - image: cimg/base:stable
+                    steps:
+                        - gh/setup
+                        - run:
+                            command: |
+                                gh pr create --title "Bugfix from $CIRCLE_BRANCH"
+                            name: Create Pull Request
+                        - gh/clone
+            workflows:
+                use-my-orb:
+                    jobs:
+                        - create-a-pr
 
